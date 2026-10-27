@@ -1,8 +1,14 @@
 const DEFAULT_MENU = [
-  { id: 'sandwich', name: 'Veggie sandwich', description: 'Fresh greens, tomato & mint chutney', price: 45, category: 'quick', image_url: '', available: true, position: 0, emoji: '🥪', color: '#dcebd2' },
-  { id: 'idli', name: 'Idli sambar', description: 'Fluffy idlis with warm, homestyle sambar', price: 35, category: 'hot', image_url: '', available: true, position: 1, emoji: '🥣', color: '#f2e7ce' },
-  { id: 'poha', name: 'Masala poha', description: 'Light, lemony & topped with crunchy sev', price: 30, category: 'quick', image_url: '', available: true, position: 2, emoji: '🍲', color: '#f4dfc9' },
+  { id: 'sandwich', name: 'Veggie sandwich', description: 'Fresh greens, tomato & mint chutney', price: 45, category: 'snacks', image_url: '', available: true, position: 0, emoji: '🥪', color: '#dcebd2' },
+  { id: 'idli', name: 'Idli sambar', description: 'Fluffy idlis with warm, homestyle sambar', price: 35, category: 'breakfast', image_url: '', available: true, position: 1, emoji: '🥣', color: '#f2e7ce' },
+  { id: 'poha', name: 'Masala poha', description: 'Light, lemony & topped with crunchy sev', price: 30, category: 'breakfast', image_url: '', available: true, position: 2, emoji: '🍲', color: '#f4dfc9' },
   { id: 'chai', name: 'Hot masala chai', description: 'A little ginger, a lot of comfort', price: 15, category: 'drinks', image_url: '', available: true, position: 3, emoji: '☕', color: '#e6d9cf' }
+];
+let CATEGORIES = [
+  { id: 'breakfast', name: 'Breakfast', position: 0 },
+  { id: 'lunch', name: 'Lunch', position: 1 },
+  { id: 'snacks', name: 'Snacks', position: 2 },
+  { id: 'drinks', name: 'Drinks', position: 3 }
 ];
 const DEFAULT_SERVICE = { id: 1, is_open: true, service_name: 'Breakfast pickup', pickup_start: '10:00', pickup_end: '10:30', cutoff_time: '09:45', timezone: 'Asia/Kolkata' };
 const ORDER_KEY = 'breakbite-orders-v1';
@@ -19,6 +25,11 @@ let currentUser = null;
 let isStaff = false;
 let staffRole = null;
 let realtimeChannel = null;
+let cropImage = null;
+let cropObjectUrl = null;
+let cropImageBounds = null;
+let cropSelection = null;
+let cropDrag = null;
 const $ = selector => document.querySelector(selector);
 const $$ = selector => [...document.querySelectorAll(selector)];
 
@@ -34,6 +45,80 @@ function total() { return Object.entries(cart).reduce((sum, [id, count]) => sum 
 function showToast(message) {
   const element = $('#toast'); element.textContent = message; element.classList.add('show');
   clearTimeout(toastTimer); toastTimer = setTimeout(() => element.classList.remove('show'), 3200);
+}
+function cropPointerPoint(event) {
+  const bounds = $('#crop-canvas').getBoundingClientRect();
+  return { x: (event.clientX - bounds.left) * ($('#crop-canvas').width / bounds.width), y: (event.clientY - bounds.top) * ($('#crop-canvas').height / bounds.height) };
+}
+function cropRatio() {
+  const width = Number($('#crop-width').value) || 1200;
+  const height = Number($('#crop-height').value) || 900;
+  return width / height;
+}
+function drawCropPreview() {
+  const canvas = $('#crop-canvas'); const context = canvas.getContext('2d');
+  context.clearRect(0, 0, canvas.width, canvas.height); context.fillStyle = '#23342a'; context.fillRect(0, 0, canvas.width, canvas.height);
+  if (!cropImage || !cropImageBounds) return;
+  context.drawImage(cropImage, cropImageBounds.x, cropImageBounds.y, cropImageBounds.width, cropImageBounds.height);
+  if (!cropSelection) return;
+  const crop = cropSelection; context.fillStyle = '#111a1499';
+  context.fillRect(cropImageBounds.x, cropImageBounds.y, cropImageBounds.width, Math.max(0, crop.y - cropImageBounds.y));
+  context.fillRect(cropImageBounds.x, crop.y + crop.height, cropImageBounds.width, Math.max(0, cropImageBounds.y + cropImageBounds.height - crop.y - crop.height));
+  context.fillRect(cropImageBounds.x, crop.y, Math.max(0, crop.x - cropImageBounds.x), crop.height);
+  context.fillRect(crop.x + crop.width, crop.y, Math.max(0, cropImageBounds.x + cropImageBounds.width - crop.x - crop.width), crop.height);
+  context.strokeStyle = '#fff'; context.lineWidth = 3; context.strokeRect(crop.x, crop.y, crop.width, crop.height);
+  context.strokeStyle = '#ffffff9c'; context.lineWidth = 1;
+  for (let step = 1; step <= 2; step++) {
+    const x = crop.x + crop.width * step / 3; const y = crop.y + crop.height * step / 3;
+    context.beginPath(); context.moveTo(x, crop.y); context.lineTo(x, crop.y + crop.height); context.stroke();
+    context.beginPath(); context.moveTo(crop.x, y); context.lineTo(crop.x + crop.width, y); context.stroke();
+  }
+}
+function resetCropSelection() {
+  if (!cropImageBounds) return;
+  const ratio = cropRatio(); const zoom = Number($('#crop-zoom').value) || 1;
+  const maxWidth = cropImageBounds.width * 0.9; const maxHeight = cropImageBounds.height * 0.9;
+  const width = Math.min(maxWidth, maxHeight * ratio) / zoom; const height = width / ratio;
+  cropSelection = { x: cropImageBounds.x + (cropImageBounds.width - width) / 2, y: cropImageBounds.y + (cropImageBounds.height - height) / 2, width, height };
+  drawCropPreview();
+}
+function clearCropImage() {
+  if (cropObjectUrl) URL.revokeObjectURL(cropObjectUrl);
+  cropObjectUrl = null; cropImage = null; cropImageBounds = null; cropSelection = null; cropDrag = null;
+  $('#image-crop-tool').classList.add('hidden'); drawCropPreview();
+}
+function loadCropImage(file) {
+  clearCropImage(); if (!file) return;
+  const message = $('#menu-editor-message');
+  if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type) || file.size > 5 * 1024 * 1024) {
+    message.textContent = 'Choose a JPG, PNG or WebP image smaller than 5 MB.'; $('#menu-item-image-file').value = ''; return;
+  }
+  message.textContent = '';
+  cropObjectUrl = URL.createObjectURL(file); cropImage = new Image();
+  cropImage.onload = () => {
+    const scale = Math.min($('#crop-canvas').width / cropImage.naturalWidth, $('#crop-canvas').height / cropImage.naturalHeight);
+    const width = cropImage.naturalWidth * scale; const height = cropImage.naturalHeight * scale;
+    cropImageBounds = { x: ($('#crop-canvas').width - width) / 2, y: ($('#crop-canvas').height - height) / 2, width, height };
+    $('#image-crop-tool').classList.remove('hidden'); $('#crop-preset').value = '4:3'; $('#crop-width').value = 1200; $('#crop-height').value = 900; $('#crop-zoom').value = 1;
+    resetCropSelection();
+  };
+  cropImage.onerror = () => { message.textContent = 'This image could not be opened. Try another JPG, PNG or WebP.'; clearCropImage(); };
+  cropImage.src = cropObjectUrl;
+}
+function croppedImageBlob() {
+  return new Promise((resolve, reject) => {
+    if (!cropImage || !cropImageBounds || !cropSelection) { reject(new Error('Wait for the crop preview to load, then try again.')); return; }
+    const outputWidth = Number($('#crop-width').value); const outputHeight = Number($('#crop-height').value);
+    if (!outputWidth || !outputHeight || outputWidth < 100 || outputHeight < 100 || outputWidth > 2000 || outputHeight > 2000) {
+      reject(new Error('Crop width and height must each be between 100 and 2000 pixels.')); return;
+    }
+    const scale = cropImageBounds.width / cropImage.naturalWidth;
+    const sourceX = (cropSelection.x - cropImageBounds.x) / scale; const sourceY = (cropSelection.y - cropImageBounds.y) / scale;
+    const sourceWidth = cropSelection.width / scale; const sourceHeight = cropSelection.height / scale;
+    const canvas = document.createElement('canvas'); canvas.width = outputWidth; canvas.height = outputHeight;
+    canvas.getContext('2d').drawImage(cropImage, sourceX, sourceY, sourceWidth, sourceHeight, 0, 0, outputWidth, outputHeight);
+    canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error('Could not create the cropped photo.')), 'image/webp', 0.9);
+  });
 }
 function formatTime(value) {
   if (!value) return '';
@@ -92,13 +177,55 @@ function updateServiceUI() {
   renderCart();
 }
 function updateCategories() {
-  const categories = [...new Set(MENU.map(entry => entry.category).filter(Boolean))];
-  const labels = { quick: 'Quick bites', hot: 'Hot breakfast', drinks: 'Drinks' };
-  const selected = $('.category.active')?.dataset.category || 'all';
-  $('.category-row').innerHTML = `<button class="category ${selected === 'all' ? 'active' : ''}" data-category="all">All items <span>${MENU.filter(entry => entry.available !== false).length}</span></button>${categories.map(category => `<button class="category ${selected === category ? 'active' : ''}" data-category="${escapeHtml(category)}">${escapeHtml(labels[category] || category)}</button>`).join('')}`;
+  const current = $('.category.active')?.dataset.category || 'all';
+  const selected = current === 'all' || CATEGORIES.some(category => category.id === current) ? current : 'all';
+  $('.category-row').innerHTML = `<button class="category ${selected === 'all' ? 'active' : ''}" data-category="all">All items <span>${MENU.filter(entry => entry.available !== false).length}</span></button>${CATEGORIES.map(category => `<button class="category ${selected === category.id ? 'active' : ''}" data-category="${escapeHtml(category.id)}">${escapeHtml(category.name)}</button>`).join('')}`;
   $$('.category').forEach(button => button.addEventListener('click', () => {
     $$('.category').forEach(other => other.classList.toggle('active', other === button)); renderMenu();
   }));
+}
+function categoryLabel(id) { return CATEGORIES.find(category => category.id === id)?.name || 'Menu'; }
+function refreshCategoryControls(selected = '') {
+  $('#menu-item-category').innerHTML = CATEGORIES.map(category => `<option value="${escapeHtml(category.id)}">${escapeHtml(category.name)}</option>`).join('');
+  $('#menu-item-category').value = CATEGORIES.some(category => category.id === selected) ? selected : (CATEGORIES[0]?.id || '');
+  $('#category-manager-list').innerHTML = CATEGORIES.map(category => `<div class="category-manager-row"><span>${escapeHtml(category.name)}</span><div><button class="outline-button rename-category" type="button" data-id="${escapeHtml(category.id)}">Rename</button><button class="outline-button remove-category" type="button" data-id="${escapeHtml(category.id)}">Remove</button></div></div>`).join('');
+  $$('.rename-category').forEach(button => button.addEventListener('click', () => renameCategory(button.dataset.id)));
+  $$('.remove-category').forEach(button => button.addEventListener('click', () => removeCategory(button.dataset.id)));
+}
+async function loadCategories() {
+  const { data, error } = await db.from('menu_categories').select('*').order('position').order('name');
+  if (error) throw error;
+  CATEGORIES = data || [];
+  refreshCategoryControls($('#menu-item-category')?.value);
+  updateCategories();
+}
+async function renameCategory(id) {
+  if (!db || !backendReady) return;
+  const category = CATEGORIES.find(entry => entry.id === id); if (!category) return;
+  const name = window.prompt('Section name', category.name)?.trim(); if (!name || name === category.name) return;
+  if (name.length > 32) { showToast('Section names can be up to 32 characters.'); return; }
+  const { error } = await db.from('menu_categories').update({ name }).eq('id', id);
+  if (error) { showToast(`Could not rename section: ${error.message}`); return; }
+  await loadCategories(); await loadMenu(); showToast('Menu section renamed.');
+}
+async function removeCategory(id) {
+  if (!db || !backendReady) return;
+  const category = CATEGORIES.find(entry => entry.id === id); if (!category) return;
+  if (MENU.some(entry => entry.category === id)) { showToast('Move or remove this section’s menu items before deleting it.'); return; }
+  if (CATEGORIES.length <= 1) { showToast('Keep at least one menu section.'); return; }
+  if (!window.confirm(`Remove the “${category.name}” section?`)) return;
+  const { error } = await db.from('menu_categories').delete().eq('id', id);
+  if (error) { showToast(`Could not remove section: ${error.message}`); return; }
+  await loadCategories(); showToast('Menu section removed.');
+}
+async function addCategory(event) {
+  event.preventDefault(); if (!db || !backendReady) { showToast('Connect the online server before editing menu sections.'); return; }
+  const input = $('#new-category-name'); const name = input.value.trim();
+  if (!name || name.length > 32) { showToast('Enter a section name up to 32 characters.'); return; }
+  const id = `section-${crypto.randomUUID()}`;
+  const { error } = await db.from('menu_categories').insert({ id, name, position: CATEGORIES.length });
+  if (error) { showToast(`Could not add section: ${error.message}`); return; }
+  input.value = ''; await loadCategories(); showToast('Menu section added.');
 }
 function renderMenu() {
   const activeCategory = $('.category.active')?.dataset.category || 'all';
@@ -106,7 +233,7 @@ function renderMenu() {
   $('#menu-grid').innerHTML = visible.length ? visible.map(entry => `
     <article class="menu-card"><div class="food-image" style="background:${escapeHtml(entry.color || '#e8efdf')}">
       ${entry.image_url ? `<img class="food-photo" src="${escapeHtml(entry.image_url)}" alt="${escapeHtml(entry.name)}" loading="lazy">` : `<span class="food-emoji">${escapeHtml(entry.emoji || '🍽️')}</span>`}
-      <span class="food-tag">${escapeHtml(entry.tag || (entry.category || 'MENU ITEM').toUpperCase())}</span></div>
+      <span class="food-tag">${escapeHtml(entry.tag || categoryLabel(entry.category).toUpperCase())}</span></div>
       <div class="food-info"><h3 class="food-title">${escapeHtml(entry.name)}</h3><p class="food-desc">${escapeHtml(entry.description || '')}</p>
       <div class="food-bottom"><span class="price">₹${Number(entry.price)}</span>${cart[entry.id] ? `<div class="quantity"><button data-change="-1" data-id="${escapeHtml(entry.id)}" aria-label="Remove one ${escapeHtml(entry.name)}">−</button><span>${cart[entry.id]}</span><button data-change="1" data-id="${escapeHtml(entry.id)}" aria-label="Add one ${escapeHtml(entry.name)}">+</button></div>` : `<button class="add-button" data-change="1" data-id="${escapeHtml(entry.id)}" aria-label="Add ${escapeHtml(entry.name)}">+</button>`}</div></div></article>`).join('') : '<div class="menu-empty">No items in this section right now.</div>';
   $$('.add-button,.quantity button').forEach(button => button.addEventListener('click', () => {
@@ -200,9 +327,10 @@ async function loadService() {
 }
 async function reloadOnlineData() {
   if (!db) return;
-  const results = await Promise.allSettled([loadMenu(), loadService(), reloadOrders()]);
+  const results = await Promise.allSettled([loadCategories(), loadService(), reloadOrders()]);
   const failure = results.find(result => result.status === 'rejected');
   if (failure) throw new Error(failure.reason?.message || String(failure.reason));
+  await loadMenu();
 }
 async function ensureAnonymousSession() {
   if (!db) return;
@@ -239,6 +367,7 @@ async function initBackend() {
     await reloadOnlineData();
     realtimeChannel = db.channel('breakbite-live').on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, reloadOrders)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'menu_items' }, () => loadMenu().catch(error => showToast(error.message)))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'menu_categories' }, async () => { try { await loadCategories(); await loadMenu(); } catch (error) { showToast(error.message); } })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'service_settings' }, () => loadService().catch(error => showToast(error.message)))
       .subscribe();
     db.auth.onAuthStateChange(() => setTimeout(async () => { await refreshIdentity(); if (isStaff) await reloadOrders(); }, 0));
@@ -258,17 +387,17 @@ function renderMenuManager() {
   if (!$('#menu-manager-list')) return;
   const active = MENU.filter(entry => entry.available !== false).length;
   $('#menu-manager-count').textContent = `${MENU.length} items · ${active} available to order`;
-  $('#menu-manager-list').innerHTML = MENU.length ? MENU.map(entry => `<article class="menu-manager-row"><div class="manager-thumb">${entry.image_url ? `<img src="${escapeHtml(entry.image_url)}" alt="">` : escapeHtml(entry.emoji || '🍽️')}</div><div class="manager-item-info"><strong>${escapeHtml(entry.name)}</strong><small>₹${Number(entry.price)} · ${escapeHtml(entry.category)} · ${entry.available === false ? 'Hidden' : 'Available'}</small></div><button class="outline-button edit-menu-item" type="button" data-id="${escapeHtml(entry.id)}">Edit</button><button class="outline-button delete-menu-item" type="button" data-id="${escapeHtml(entry.id)}">Remove</button></article>`).join('') : '<p class="menu-empty">Add the first item to your menu.</p>';
+  $('#menu-manager-list').innerHTML = MENU.length ? MENU.map(entry => `<article class="menu-manager-row"><div class="manager-thumb">${entry.image_url ? `<img src="${escapeHtml(entry.image_url)}" alt="">` : escapeHtml(entry.emoji || '🍽️')}</div><div class="manager-item-info"><strong>${escapeHtml(entry.name)}</strong><small>₹${Number(entry.price)} · ${escapeHtml(categoryLabel(entry.category))} · ${entry.available === false ? 'Hidden' : 'Available'}</small></div><button class="outline-button edit-menu-item" type="button" data-id="${escapeHtml(entry.id)}">Edit</button><button class="outline-button delete-menu-item" type="button" data-id="${escapeHtml(entry.id)}">Remove</button></article>`).join('') : '<p class="menu-empty">Add the first item to your menu.</p>';
   $$('.edit-menu-item').forEach(button => button.addEventListener('click', () => openMenuEditor(button.dataset.id)));
   $$('.delete-menu-item').forEach(button => button.addEventListener('click', () => removeMenuItem(button.dataset.id)));
 }
 function openMenuEditor(id = '') {
   const entry = MENU.find(itemValue => itemValue.id === id);
-  $('#menu-editor-form').reset(); $('#menu-item-id').value = entry?.id || '';
+  clearCropImage(); $('#menu-editor-form').reset(); $('#menu-item-id').value = entry?.id || '';
   $('#menu-editor-title').textContent = entry ? 'Edit menu item' : 'Add a menu item';
   $('#save-menu-item').textContent = entry ? 'Save changes' : 'Add to menu';
   $('#menu-item-name').value = entry?.name || ''; $('#menu-item-description').value = entry?.description || '';
-  $('#menu-item-price').value = entry?.price ?? ''; $('#menu-item-category').value = entry?.category || 'quick';
+  $('#menu-item-price').value = entry?.price ?? ''; refreshCategoryControls(entry?.category || CATEGORIES[0]?.id);
   $('#menu-item-image-url').value = entry?.image_url || ''; $('#menu-item-available').checked = entry?.available !== false;
   $('#menu-editor-message').textContent = ''; $('#menu-editor-modal').classList.remove('hidden'); $('#menu-item-name').focus();
 }
@@ -281,14 +410,15 @@ async function saveMenuItem(event) {
   saveButton.disabled = true; message.textContent = file ? 'Uploading photo…' : 'Saving…';
   try {
     if (file) {
-      const path = `${id}/${crypto.randomUUID()}-${file.name.replace(/[^a-zA-Z0-9._-]/g, '-')}`;
-      const { error: uploadError } = await db.storage.from('menu-images').upload(path, file, { cacheControl: '3600', upsert: false, contentType: file.type });
+      const croppedPhoto = await croppedImageBlob();
+      const path = `${id}/${crypto.randomUUID()}-cropped.webp`;
+      const { error: uploadError } = await db.storage.from('menu-images').upload(path, croppedPhoto, { cacheControl: '3600', upsert: false, contentType: 'image/webp' });
       if (uploadError) throw uploadError; imageUrl = db.storage.from('menu-images').getPublicUrl(path).data.publicUrl;
     }
     const oldItem = MENU.find(entry => entry.id === id);
     const row = { id, name: $('#menu-item-name').value.trim(), description: $('#menu-item-description').value.trim(), price: Number($('#menu-item-price').value), category: $('#menu-item-category').value, image_url: imageUrl, available: $('#menu-item-available').checked, position: oldItem?.position ?? MENU.length };
     const { error } = await db.from('menu_items').upsert(row); if (error) throw error;
-    $('#menu-editor-modal').classList.add('hidden'); await loadMenu(); showToast(oldItem ? 'Menu item updated.' : 'Menu item added.');
+    $('#menu-editor-modal').classList.add('hidden'); clearCropImage(); await loadMenu(); showToast(oldItem ? 'Menu item updated.' : 'Menu item added.');
   } catch (error) { message.textContent = error.message; }
   finally { saveButton.disabled = false; }
 }
@@ -384,9 +514,33 @@ $('#service-open').addEventListener('change', () => { service.is_open = $('#serv
 $('#orders-date').addEventListener('change', renderStaff);
 $('#orders-today').addEventListener('click', () => { initializeOrdersDate(); renderStaff(); });
 $('#add-menu-item').addEventListener('click', () => openMenuEditor());
-$('#menu-editor-close').addEventListener('click', () => $('#menu-editor-modal').classList.add('hidden'));
-$('#menu-editor-modal').addEventListener('click', event => { if (event.target === $('#menu-editor-modal')) $('#menu-editor-modal').classList.add('hidden'); });
+$('#menu-editor-close').addEventListener('click', () => { $('#menu-editor-modal').classList.add('hidden'); clearCropImage(); });
+$('#menu-editor-modal').addEventListener('click', event => { if (event.target === $('#menu-editor-modal')) { $('#menu-editor-modal').classList.add('hidden'); clearCropImage(); } });
 $('#menu-editor-form').addEventListener('submit', saveMenuItem);
+$('#category-add-form').addEventListener('submit', addCategory);
+$('#menu-item-image-file').addEventListener('change', event => loadCropImage(event.target.files[0]));
+$('#crop-preset').addEventListener('change', () => {
+  const sizes = { '1:1': [1200, 1200], '4:3': [1200, 900], '16:9': [1600, 900], '3:4': [900, 1200] };
+  if (sizes[$('#crop-preset').value]) { $('#crop-width').value = sizes[$('#crop-preset').value][0]; $('#crop-height').value = sizes[$('#crop-preset').value][1]; resetCropSelection(); }
+});
+['crop-width', 'crop-height'].forEach(id => $(`#${id}`).addEventListener('input', () => { $('#crop-preset').value = 'custom'; resetCropSelection(); }));
+$('#crop-zoom').addEventListener('input', resetCropSelection);
+$('#crop-reset').addEventListener('click', () => { $('#crop-zoom').value = 1; resetCropSelection(); });
+$('#crop-canvas').addEventListener('pointerdown', event => {
+  if (!cropSelection) return;
+  const point = cropPointerPoint(event);
+  if (point.x < cropSelection.x || point.x > cropSelection.x + cropSelection.width || point.y < cropSelection.y || point.y > cropSelection.y + cropSelection.height) return;
+  cropDrag = { point, x: cropSelection.x, y: cropSelection.y }; $('#crop-canvas').setPointerCapture(event.pointerId); event.preventDefault();
+});
+$('#crop-canvas').addEventListener('pointermove', event => {
+  if (!cropDrag || !cropSelection || !cropImageBounds) return;
+  const point = cropPointerPoint(event);
+  cropSelection.x = Math.max(cropImageBounds.x, Math.min(cropImageBounds.x + cropImageBounds.width - cropSelection.width, cropDrag.x + point.x - cropDrag.point.x));
+  cropSelection.y = Math.max(cropImageBounds.y, Math.min(cropImageBounds.y + cropImageBounds.height - cropSelection.height, cropDrag.y + point.y - cropDrag.point.y));
+  drawCropPreview();
+});
+$('#crop-canvas').addEventListener('pointerup', () => { cropDrag = null; });
+$('#crop-canvas').addEventListener('pointercancel', () => { cropDrag = null; });
 $('#staff-account-form').addEventListener('submit', createStaffAccount);
 $('#install-app').addEventListener('click', async () => {
   if (!installPrompt) { $('#install-help').classList.toggle('hidden'); return; }

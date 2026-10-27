@@ -1,4 +1,4 @@
-const CACHE = 'breakbite-shell-v6';
+const CACHE = 'breakbite-shell-v7';
 const FILES = ['./', './index.html', './styles.css', './app.js', './backend-config.js', './manifest.webmanifest', './icon.svg'];
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(FILES)));
