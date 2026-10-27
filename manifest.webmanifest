@@ -1,0 +1,14 @@
+{
+  "id": "./",
+  "name": "BreakBite — Campus Canteen",
+  "short_name": "BreakBite",
+  "description": "Preorder breakfast and pick it up by token at your campus canteen.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#fbfcf9",
+  "theme_color": "#f4f5ef",
+  "categories": ["food", "lifestyle"],
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
+}
