@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f4f5ef">
+  <meta name="description" content="Order breakfast ahead and pick it up by token at your campus canteen.">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="BreakBite">
+  <title>BreakBite — Canteen preorder</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="backend-config.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#" aria-label="BreakBite home"><span class="brand-mark">B</span><span>break<span class="brand-accent">bite</span></span></a>
+    <nav class="main-nav" aria-label="Main navigation"><button class="nav-link active" data-view="menu">Order food</button><button class="nav-link" data-view="track">My token</button></nav>
+    <div class="header-actions"><button class="install-link hidden" id="install-app">Install app <span aria-hidden="true">↓</span></button><button class="staff-link" id="staff-toggle">Staff view <span aria-hidden="true">↗</span></button></div>
+  </header>
+
+  <main>
+    <section id="student-view">
+      <section class="hero">
+        <div class="hero-copy"><div class="eyebrow"><span class="live-dot"></span> CAMPUS CANTEEN · BREAK SERVICE</div><h1>Beat the queue.<br><span>Keep your break.</span></h1><p>Order now, pick it up when your token is called.</p>
+          <div class="service-note"><span class="note-icon">◷</span><span><strong id="service-name-public">Breakfast pickup</strong><br><span id="service-day">Today</span>, <span id="service-time-public">10:00 – 10:30 AM</span></span><span class="note-divider"></span><span class="open-label" id="service-status-public">Checking service…</span></div>
+        </div>
+        <div class="hero-art" aria-hidden="true"><div class="sun"></div><div class="plate"><div class="plate-food">🥪</div><span class="plate-leaf">✦</span></div><div class="art-card"><span>YOUR BREAK,</span><strong>served better.</strong></div><span class="art-spark spark-one">✳</span><span class="art-spark spark-two">✦</span></div>
+      </section>
+
+      <div class="content-wrap" id="menu-view">
+        <div class="section-heading"><div><div class="eyebrow muted"><span id="menu-day">TODAY</span> · MENU</div><h2>Good morning, hungry human.</h2><p>Choose your favorites. We’ll have them ready for your break.</p></div><div class="order-cutoff"><span class="cutoff-icon">⌛</span><span>Order by <strong id="cutoff-public">9:45 AM</strong></span></div></div>
+        <div class="category-row"><button class="category active" data-category="all">All items <span>4</span></button><button class="category" data-category="quick">Quick bites</button><button class="category" data-category="hot">Hot breakfast</button><button class="category" data-category="drinks">Drinks</button></div>
+        <div class="menu-grid" id="menu-grid"></div>
+      </div>
+
+      <section class="track-section hidden" id="track-view"><div class="track-card"><div class="track-top"><div><div class="eyebrow muted">YOUR BREAKBITE ORDER</div><h2>Track your token</h2></div><span class="status-pill" id="track-status">No active order</span></div><div id="empty-track" class="empty-state"><span class="empty-icon">♧</span><h3>Your next break starts here.</h3><p>Place an order and your token will show up here.</p><button class="primary-button" id="browse-menu">Browse the menu <span>→</span></button></div><div id="active-track" class="active-track hidden"></div></div></section>
+    </section>
+
+    <section class="staff-view hidden" id="staff-view">
+      <div class="staff-header"><div><div class="eyebrow muted">CANTEEN DASHBOARD · LIVE SERVICE</div><h1>Kitchen dashboard</h1><p id="staff-service-summary">Loading service settings…</p></div><div class="staff-header-actions"><span id="staff-identity" class="staff-identity"></span><button class="outline-button" id="staff-signout">Sign out</button><button class="outline-button" id="student-toggle">← Student view</button></div></div>
+      <div class="stats-grid"><div class="stat-card"><span>Orders today</span><strong id="stat-total">0</strong><small>for this break</small></div><div class="stat-card"><span>To prepare</span><strong id="stat-pending">0</strong><small>waiting in the queue</small></div><div class="stat-card"><span>Ready for pickup</span><strong id="stat-ready">0</strong><small>call their tokens</small></div><div class="stat-card highlight"><span>Now serving</span><strong id="stat-serving">—</strong><small>next up at the counter</small></div></div>
+      <div class="staff-tools-grid">
+        <section class="queue-card staff-panel"><div class="queue-header"><div><h2>Service hours & availability</h2><p>Changes update the student menu straight away.</p></div><span id="settings-save-state" class="settings-state"></span></div><form id="service-form" class="settings-form"><label class="switch-row"><span><strong>Accepting online orders</strong><small>Turn this off when the kitchen is closed or busy.</small></span><input id="service-open" type="checkbox"><span class="switch-control"></span></label><label>Service name<input id="service-name" maxlength="48" required placeholder="Breakfast pickup"></label><div class="settings-time-row"><label>Pickup starts<input id="pickup-start" type="time" required></label><label>Pickup ends<input id="pickup-end" type="time" required></label><label>Order cutoff<input id="order-cutoff" type="time" required></label></div><button class="primary-button" type="submit">Save service settings</button></form></section>
+        <section class="queue-card staff-panel"><div class="queue-header"><div><h2>Menu</h2><p id="menu-manager-count">Loading items…</p></div><button class="primary-button" id="add-menu-item" type="button">＋ Add item</button></div><div class="menu-manager-list" id="menu-manager-list"></div></section>
+      </div>
+      <section class="queue-card staff-panel admin-panel hidden" id="staff-accounts-panel"><div class="queue-header"><div><h2>Staff accounts</h2><p>Create sign-in credentials for kitchen staff.</p></div><span class="admin-badge">ADMIN</span></div><form id="staff-account-form" class="settings-form staff-account-form"><label>Staff name<input id="new-staff-name" maxlength="60" required placeholder="e.g. Asha Kumar"></label><label>Login email / ID<input id="new-staff-email" type="email" maxlength="120" required placeholder="asha@canteen.edu"></label><label>Temporary password<input id="new-staff-password" type="password" minlength="10" required autocomplete="new-password" placeholder="At least 10 characters"></label><button class="primary-button" type="submit">Create staff login</button><small class="demo-note" id="staff-account-message">Share the login details with the staff member securely.</small></form><div id="staff-account-list" class="staff-account-list"></div></section>
+      <div class="queue-card"><div class="queue-header"><div><h2>Order queue</h2><p>Move each order along as it’s prepared.</p></div><span class="queue-live"><span class="live-dot"></span> UPDATING LIVE</span></div><div class="queue-table-wrap"><table><thead><tr><th>TOKEN</th><th>STUDENT</th><th>ORDER</th><th>PICKUP</th><th>STATUS</th><th></th></tr></thead><tbody id="orders-body"></tbody></table><div class="empty-queue" id="empty-queue">No orders yet. Student orders will appear here.</div></div></div>
+    </section>
+  </main>
+
+  <div class="cart-bar hidden" id="cart-bar"><div class="cart-summary"><span class="cart-count" id="cart-count">0</span><span><strong id="cart-items-label">0 items</strong><small id="cart-service-label">Pickup time shown at checkout</small></span></div><span class="cart-total" id="cart-total">₹0</span><button class="checkout-button" id="checkout">Review order <span>→</span></button></div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <div class="install-help hidden" id="install-help" role="status">To install, open your browser menu and choose <strong>Install app</strong> or <strong>Add to Home screen</strong>.</div>
+  <div class="modal-backdrop hidden" id="modal"><div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><button class="modal-close" id="modal-close" aria-label="Close">×</button><div class="eyebrow muted">ONE LAST THING</div><h2 id="modal-title">Who’s picking up?</h2><p>We’ll put your name on the order. Your token is your place in the queue.</p><label for="student-name">Your name</label><input id="student-name" placeholder="e.g. Asha Kumar" maxlength="36" autocomplete="name"><div class="modal-total"><span id="modal-items">0 items</span><strong id="modal-price">₹0</strong></div><button class="primary-button full-button" id="place-order">Place order <span>→</span></button><small class="demo-note" id="order-note">No payment is collected.</small></div></div>
+  <div class="modal-backdrop hidden" id="staff-login-modal"><div class="modal" role="dialog" aria-modal="true" aria-labelledby="staff-login-title"><button class="modal-close" id="staff-login-close" aria-label="Close">×</button><div class="eyebrow muted">CANTEEN TEAM</div><h2 id="staff-login-title">Staff sign in</h2><p>Use the login email and password provided by your canteen administrator.</p><form id="staff-login-form"><label for="staff-email">Login email (staff ID)</label><input id="staff-email" type="email" placeholder="staff@canteen.edu" autocomplete="username" required><label for="staff-password" class="password-label">Password</label><input id="staff-password" type="password" placeholder="Password" autocomplete="current-password" required><button class="primary-button full-button login-button" id="staff-login-submit" type="submit">Sign in <span>→</span></button></form><small class="demo-note" id="staff-login-error"></small></div></div>
+  <div class="modal-backdrop hidden" id="menu-editor-modal"><div class="modal menu-editor-modal" role="dialog" aria-modal="true" aria-labelledby="menu-editor-title"><button class="modal-close" id="menu-editor-close" aria-label="Close">×</button><div class="eyebrow muted">KITCHEN MENU</div><h2 id="menu-editor-title">Add a menu item</h2><form id="menu-editor-form" class="settings-form"><input id="menu-item-id" type="hidden"><label>Food name<input id="menu-item-name" maxlength="70" required placeholder="e.g. Masala dosa"></label><label>Description<textarea id="menu-item-description" rows="2" maxlength="180" placeholder="A short description for students"></textarea></label><div class="settings-time-row"><label>Price (₹)<input id="menu-item-price" type="number" min="1" max="100000" step="1" required></label><label>Category<select id="menu-item-category"><option value="quick">Quick bites</option><option value="hot">Hot breakfast</option><option value="drinks">Drinks</option></select></label></div><label>Photo<input id="menu-item-image-file" type="file" accept="image/jpeg,image/png,image/webp"><small class="field-help">JPG, PNG or WebP · up to 5 MB</small></label><label>Or paste an image URL<input id="menu-item-image-url" type="url" maxlength="500" placeholder="https://…"></label><label class="switch-row"><span><strong>Available to order</strong><small>Unavailable items are hidden from students.</small></span><input id="menu-item-available" type="checkbox" checked><span class="switch-control"></span></label><button class="primary-button full-button" id="save-menu-item" type="submit">Save menu item</button><small class="demo-note" id="menu-editor-message"></small></form></div></div>
+  <script src="app.js"></script>
+</body>
+</html>
