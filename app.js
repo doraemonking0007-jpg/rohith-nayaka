@@ -21,6 +21,10 @@ let toastTimer;
 let db = null;
 let backendConfigured = Boolean(window.BREAKBITE_SUPABASE_URL && window.BREAKBITE_SUPABASE_PUBLISHABLE_KEY);
 let backendReady = false;
+let backendConnectionStarting = Boolean(window.BREAKBITE_SUPABASE_URL && window.BREAKBITE_SUPABASE_PUBLISHABLE_KEY);
+let serviceSyncHealthy = false;
+let serviceRefreshPromise = null;
+let orderSubmissionInProgress = false;
 let currentUser = null;
 let isStaff = false;
 let staffRole = null;
@@ -120,6 +124,37 @@ function croppedImageBlob() {
     canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error('Could not create the cropped photo.')), 'image/webp', 0.9);
   });
 }
+function timePickerParts(value) {
+  const [rawHour, rawMinute] = String(value || '00:00').slice(0, 5).split(':').map(Number);
+  const hour = Number.isFinite(rawHour) ? rawHour : 0;
+  return { hour: String(hour % 12 || 12), minute: String(Number.isFinite(rawMinute) ? rawMinute : 0).padStart(2, '0'), meridiem: hour < 12 ? 'AM' : 'PM' };
+}
+function setTimePickerValue(id, value) {
+  const input = $(`#${id}`); if (!input) return;
+  input.value = String(value || '00:00').slice(0, 5);
+  const picker = document.querySelector(`[data-time-picker="${id}"]`); if (!picker) return;
+  const parts = timePickerParts(input.value);
+  picker.querySelector('[data-part="hour"]').value = parts.hour;
+  picker.querySelector('[data-part="minute"]').value = parts.minute;
+  picker.querySelector('[data-part="meridiem"]').value = parts.meridiem;
+}
+function syncTimePicker(picker) {
+  const hour12 = Number(picker.querySelector('[data-part="hour"]').value);
+  const minute = Number(picker.querySelector('[data-part="minute"]').value);
+  const meridiem = picker.querySelector('[data-part="meridiem"]').value;
+  const hour24 = hour12 % 12 + (meridiem === 'PM' ? 12 : 0);
+  $(`#${picker.dataset.timePicker}`).value = `${String(hour24).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+}
+function initializeTimePickers() {
+  $$('[data-time-picker]').forEach(picker => {
+    const name = picker.dataset.timePicker.replaceAll('-', ' ');
+    const hours = Array.from({ length: 12 }, (_, index) => `<option value="${index + 1}">${index + 1}</option>`).join('');
+    const minutes = Array.from({ length: 60 }, (_, index) => `<option value="${String(index).padStart(2, '0')}">${String(index).padStart(2, '0')}</option>`).join('');
+    picker.innerHTML = `<select data-part="hour" aria-label="${name} hour">${hours}</select><span>:</span><select data-part="minute" aria-label="${name} minute">${minutes}</select><select data-part="meridiem" aria-label="${name} AM or PM"><option>AM</option><option>PM</option></select>`;
+    picker.addEventListener('change', () => syncTimePicker(picker));
+    setTimePickerValue(picker.dataset.timePicker, $(`#${picker.dataset.timePicker}`).value);
+  });
+}
 function formatTime(value) {
   if (!value) return '';
   const [hour, minute] = value.slice(0, 5).split(':').map(Number);
@@ -136,6 +171,17 @@ function serviceDateKey(value) {
   return `${parts.year}-${parts.month}-${parts.day}`;
 }
 function todayServiceDate() { return serviceDateKey(new Date()); }
+function orderSeriesPrefix(value) {
+  const parts = new Intl.DateTimeFormat('en-GB', { timeZone: service.timezone || 'Asia/Kolkata', hour: '2-digit', hourCycle: 'h23' }).formatToParts(new Date(value));
+  const hour = Number(parts.find(part => part.type === 'hour')?.value || 0);
+  return hour < 12 ? 'B' : 'L';
+}
+function localOrderToken(createdAt) {
+  const date = serviceDateKey(createdAt); const prefix = orderSeriesPrefix(createdAt);
+  const highest = orders.filter(order => serviceDateKey(order.created_at || order.created) === date && String(order.token).startsWith(prefix))
+    .reduce((maximum, order) => Math.max(maximum, Number(String(order.token).slice(1)) || 0), 0);
+  return `${prefix}${highest + 1}`;
+}
 function serviceTimeOfDay(value) {
   const parts = new Intl.DateTimeFormat('en-GB', { timeZone: service.timezone || 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(new Date(value));
   const hour = Number(parts.find(part => part.type === 'hour')?.value || 0);
@@ -152,28 +198,55 @@ function serviceIsOpen() {
     const parts = new Intl.DateTimeFormat('en-GB', { timeZone: service.timezone || 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(new Date());
     const now = `${parts.find(part => part.type === 'hour')?.value}:${parts.find(part => part.type === 'minute')?.value}`;
     return now < String(service.cutoff_time || '23:59').slice(0, 5);
-  } catch { return Boolean(service.is_open); }
+  } catch { return false; }
+}
+function serviceCanAcceptOrders() {
+  return serviceIsOpen() && (!backendConfigured || (backendReady && serviceSyncHealthy));
+}
+function syncOrderAvailability() {
+  const open = serviceIsOpen();
+  const connected = !backendConfigured || (backendReady && serviceSyncHealthy);
+  const canOrder = open && connected;
+  $('#service-status-public').textContent = backendConfigured && !connected ? (backendConnectionStarting ? 'Connecting to server…' : 'Server connection unavailable') : open ? 'Taking orders' : 'Orders closed';
+  $('#service-status-public').classList.toggle('service-closed', !canOrder);
+  $('#staff-service-summary').textContent = `${service.service_name || 'Canteen pickup'} · ${pickupLabel()} · ${backendConfigured && !connected ? (backendConnectionStarting ? 'Connecting to server…' : 'Server connection unavailable') : open ? 'Accepting orders' : 'Orders closed'}`;
+  $('#order-note').textContent = !connected ? 'The kitchen server cannot be reached. Ordering is paused until the connection returns.' : !open ? 'Online ordering is closed right now. Please check back when service reopens.' : backendReady ? 'Your order goes to the live kitchen queue. No payment is collected.' : 'Local demo preview — this order will not reach the kitchen.';
+  const banner = $('#service-closed-banner');
+  if (banner) {
+    banner.classList.toggle('hidden', canOrder || !backendConfigured && serviceIsOpen());
+    banner.textContent = backendConfigured && (!backendReady || !serviceSyncHealthy)
+      ? (backendConnectionStarting ? 'Connecting to the canteen server. Ordering will be available when service status is confirmed.' : 'Reconnecting to the canteen server. Ordering is paused until service status is confirmed.')
+      : 'Online ordering is closed right now. You can still browse the menu.';
+  }
+  $$('#menu-grid .add-button, #menu-grid .quantity button[data-change="1"]').forEach(button => {
+    button.disabled = !canOrder;
+    button.title = canOrder ? '' : 'Online ordering is currently unavailable';
+  });
+  $('#checkout').disabled = !canOrder || cartCount() === 0;
+  $('#checkout').title = canOrder ? '' : 'Online ordering is currently unavailable';
+  $('#place-order').disabled = !canOrder || orderSubmissionInProgress;
 }
 function updateServiceUI() {
   const open = serviceIsOpen();
+  const connected = !backendConfigured || (backendReady && serviceSyncHealthy);
+  const canOrder = open && connected;
   const day = new Intl.DateTimeFormat('en-IN', { weekday: 'long' }).format(new Date());
   $('#service-day').textContent = day;
   $('#menu-day').textContent = day.toUpperCase();
   $('#service-name-public').textContent = service.service_name || 'Canteen pickup';
   $('#service-time-public').textContent = pickupLabel() || 'Pickup time to be announced';
   $('#cutoff-public').textContent = formatTime(service.cutoff_time) || '—';
-  $('#service-status-public').textContent = open ? 'Taking orders' : 'Orders closed';
-  $('#service-status-public').classList.toggle('service-closed', !open);
-  $('#order-note').textContent = backendReady ? 'Your order goes to the live kitchen queue. No payment is collected.' : backendConfigured ? 'Online service unavailable — orders are not being accepted.' : 'Local demo preview — this order will not reach the kitchen.';
+  $('#service-status-public').textContent = !connected ? 'Server connection unavailable' : open ? 'Taking orders' : 'Orders closed';
+  $('#service-status-public').classList.toggle('service-closed', !canOrder);
+  $('#order-note').textContent = !connected ? 'The kitchen server cannot be reached. Ordering is paused until the connection returns.' : !open ? 'Online ordering is closed right now. Please check back when service reopens.' : backendReady ? 'Your order goes to the live kitchen queue. No payment is collected.' : 'Local demo preview — this order will not reach the kitchen.';
   $('#cart-service-label').textContent = `Pickup ${pickupLabel() || 'time to be announced'}`;
-  $('#checkout').disabled = !open || !backendReady && backendConfigured;
-  $('#checkout').title = open ? '' : 'Online ordering is currently closed';
-  $('#staff-service-summary').textContent = `${service.service_name || 'Canteen pickup'} · ${pickupLabel()} · ${open ? 'Accepting orders' : 'Orders closed'}`;
+  $('#staff-service-summary').textContent = `${service.service_name || 'Canteen pickup'} · ${pickupLabel()} · ${!connected ? 'Server connection unavailable' : open ? 'Accepting orders' : 'Orders closed'}`;
   $('#service-open').checked = Boolean(service.is_open);
   $('#service-name').value = service.service_name || '';
-  $('#pickup-start').value = String(service.pickup_start || '10:00').slice(0, 5);
-  $('#pickup-end').value = String(service.pickup_end || '10:30').slice(0, 5);
-  $('#order-cutoff').value = String(service.cutoff_time || '09:45').slice(0, 5);
+  setTimePickerValue('pickup-start', String(service.pickup_start || '10:00').slice(0, 5));
+  setTimePickerValue('pickup-end', String(service.pickup_end || '10:30').slice(0, 5));
+  setTimePickerValue('order-cutoff', String(service.cutoff_time || '09:45').slice(0, 5));
+  syncOrderAvailability();
   renderCart();
 }
 function updateCategories() {
@@ -237,6 +310,7 @@ function renderMenu() {
       <div class="food-info"><h3 class="food-title">${escapeHtml(entry.name)}</h3><p class="food-desc">${escapeHtml(entry.description || '')}</p>
       <div class="food-bottom"><span class="price">₹${Number(entry.price)}</span>${cart[entry.id] ? `<div class="quantity"><button data-change="-1" data-id="${escapeHtml(entry.id)}" aria-label="Remove one ${escapeHtml(entry.name)}">−</button><span>${cart[entry.id]}</span><button data-change="1" data-id="${escapeHtml(entry.id)}" aria-label="Add one ${escapeHtml(entry.name)}">+</button></div>` : `<button class="add-button" data-change="1" data-id="${escapeHtml(entry.id)}" aria-label="Add ${escapeHtml(entry.name)}">+</button>`}</div></div></article>`).join('') : '<div class="menu-empty">No items in this section right now.</div>';
   $$('.add-button,.quantity button').forEach(button => button.addEventListener('click', () => {
+    if (Number(button.dataset.change) > 0 && !serviceCanAcceptOrders()) { updateServiceUI(); showToast('Online ordering is currently unavailable.'); return; }
     const id = button.dataset.id; cart[id] = Math.max(0, (cart[id] || 0) + Number(button.dataset.change));
     if (!cart[id]) delete cart[id]; renderMenu(); renderCart();
   }));
@@ -250,7 +324,7 @@ function renderCart() {
   $('#cart-total').textContent = `₹${total()}`;
   $('#modal-items').textContent = `${count} ${count === 1 ? 'item' : 'items'}`;
   $('#modal-price').textContent = `₹${total()}`;
-  $('#checkout').disabled = !serviceIsOpen() || (backendConfigured && !backendReady);
+  syncOrderAvailability();
 }
 function openTrack() {
   $$('.nav-link').forEach(button => button.classList.toggle('active', button.dataset.view === 'track'));
@@ -302,7 +376,7 @@ function renderStaff() {
   const rows = periods.map(period => {
     const group = datedOrders.filter(order => serviceTimeOfDay(order.created_at || order.created) === period);
     if (!group.length) return '';
-    const orderRows = group.map(order => `<tr><td>${escapeHtml(order.token)}</td><td>${escapeHtml(order.name)}</td><td><span class="table-order">${(order.items || []).map(entry => `${Number(entry.qty)} × ${escapeHtml(entry.name)}`).join(', ')}</span><span class="table-sub">₹${Number(order.total)} · ${new Intl.DateTimeFormat('en-IN', { hour: '2-digit', minute: '2-digit', timeZone: service.timezone || 'Asia/Kolkata' }).format(new Date(order.created_at || order.created))}</span></td><td>${escapeHtml(pickupLabel())}</td><td><span class="table-status ${escapeHtml(String(order.status).toLowerCase())}">${escapeHtml(order.status)}</span></td><td>${!isToday ? '<span class="history-readonly">History</span>' : order.status === 'Received' ? `<button class="row-action" data-order="${escapeHtml(order.id)}" data-status="Preparing">Start preparing</button>` : order.status === 'Preparing' ? `<button class="row-action" data-order="${escapeHtml(order.id)}" data-status="Ready">Mark ready</button>` : order.status === 'Ready' ? `<button class="row-action" data-order="${escapeHtml(order.id)}" data-status="Collected">Mark collected</button>` : '✓'}</td></tr>`).join('');
+    const orderRows = group.map(order => `<tr><td>${escapeHtml(order.token)}</td><td>${escapeHtml(order.name)}</td><td><span class="table-order">${(order.items || []).map(entry => `${Number(entry.qty)} × ${escapeHtml(entry.name)}`).join(', ')}</span><span class="table-sub">₹${Number(order.total)} · ${new Intl.DateTimeFormat('en-IN', { hour: 'numeric', minute: '2-digit', hour12: true, timeZone: service.timezone || 'Asia/Kolkata' }).format(new Date(order.created_at || order.created))}</span></td><td>${escapeHtml(pickupLabel())}</td><td><span class="table-status ${escapeHtml(String(order.status).toLowerCase())}">${escapeHtml(order.status)}</span></td><td>${!isToday ? '<span class="history-readonly">History</span>' : order.status === 'Received' ? `<button class="row-action" data-order="${escapeHtml(order.id)}" data-status="Preparing">Start preparing</button>` : order.status === 'Preparing' ? `<button class="row-action" data-order="${escapeHtml(order.id)}" data-status="Ready">Mark ready</button>` : order.status === 'Ready' ? `<button class="row-action" data-order="${escapeHtml(order.id)}" data-status="Collected">Mark collected</button>` : '✓'}</td></tr>`).join('');
     return `<tr class="period-row"><td colspan="6"><span>${period}</span><small>${group.length} ${group.length === 1 ? 'order' : 'orders'}</small></td></tr>${orderRows}`;
   }).join('');
   $('#orders-body').innerHTML = rows;
@@ -323,7 +397,23 @@ async function loadMenu() {
 async function loadService() {
   const { data, error } = await db.from('service_settings').select('*').eq('id', 1).single();
   if (error) throw error;
-  service = data; updateServiceUI();
+  service = data; serviceSyncHealthy = true; updateServiceUI();
+}
+function markServiceUnavailable(error) {
+  const wasHealthy = serviceSyncHealthy;
+  serviceSyncHealthy = false; updateServiceUI();
+  if (wasHealthy) showToast(`Kitchen connection lost. Ordering is paused while we reconnect${error?.message ? `: ${error.message}` : '.'}`);
+}
+async function refreshServiceStatus() {
+  if (!backendConfigured) return true;
+  if (!db || !backendReady) { markServiceUnavailable(); return false; }
+  if (serviceRefreshPromise) return serviceRefreshPromise;
+  serviceRefreshPromise = (async () => {
+    try { await loadService(); return true; }
+    catch (error) { markServiceUnavailable(error); return false; }
+    finally { serviceRefreshPromise = null; }
+  })();
+  return serviceRefreshPromise;
 }
 async function reloadOnlineData() {
   if (!db) return;
@@ -350,12 +440,14 @@ async function refreshIdentity() {
 }
 async function initBackend() {
   if (!backendConfigured) {
+    backendConnectionStarting = false;
     updateServiceUI(); $('#service-status-public').textContent = 'Demo preview · server not connected';
     $('#service-status-public').classList.add('service-closed');
     $('#staff-service-summary').textContent = 'Demo preview · connect Supabase to enable shared service controls.';
     return;
   }
   if (!window.supabase?.createClient) {
+    backendConnectionStarting = false;
     service.is_open = false; updateServiceUI(); $('#service-status-public').textContent = 'Online service unavailable';
     $('#service-status-public').classList.add('service-closed'); showToast('The online service could not load. Check your connection and refresh.'); return;
   }
@@ -368,12 +460,12 @@ async function initBackend() {
     realtimeChannel = db.channel('breakbite-live').on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, reloadOrders)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'menu_items' }, () => loadMenu().catch(error => showToast(error.message)))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'menu_categories' }, async () => { try { await loadCategories(); await loadMenu(); } catch (error) { showToast(error.message); } })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'service_settings' }, () => loadService().catch(error => showToast(error.message)))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'service_settings' }, () => refreshServiceStatus())
       .subscribe();
     db.auth.onAuthStateChange(() => setTimeout(async () => { await refreshIdentity(); if (isStaff) await reloadOrders(); }, 0));
-    updateServiceUI(); showToast('Connected to the live canteen service.');
+    backendConnectionStarting = false; updateServiceUI(); showToast('Connected to the live canteen service.');
   } catch (error) {
-    backendReady = false; service.is_open = false; updateServiceUI();
+    backendReady = false; backendConnectionStarting = false; serviceSyncHealthy = false; service.is_open = false; updateServiceUI();
     $('#service-status-public').textContent = 'Online service unavailable'; $('#service-status-public').classList.add('service-closed');
     showToast(`Online setup needs attention: ${error.message}`);
   }
@@ -426,12 +518,37 @@ async function saveServiceSettings(event) {
   event.preventDefault(); if (!db || !backendReady) { showToast('Connect the online server before changing service settings.'); return; }
   const start = $('#pickup-start').value; const end = $('#pickup-end').value; const cutoff = $('#order-cutoff').value;
   if (start >= end) { showToast('Pickup end time must be after the start time.'); return; }
-  const button = $('#service-form').querySelector('button[type="submit"]'); button.disabled = true; $('#settings-save-state').textContent = 'Saving…';
+  const button = $('#service-form').querySelector('button[type="submit"]'); const availabilitySwitch = $('#service-open');
+  button.disabled = true; availabilitySwitch.disabled = true; $('#settings-save-state').textContent = 'Saving…';
   const row = { id: 1, is_open: $('#service-open').checked, service_name: $('#service-name').value.trim(), pickup_start: start, pickup_end: end, cutoff_time: cutoff };
-  const { data, error } = await db.from('service_settings').upsert(row).select().single();
-  button.disabled = false;
-  if (error) { $('#settings-save-state').textContent = ''; showToast(`Could not save settings: ${error.message}`); return; }
+  let data; let error;
+  try { ({ data, error } = await db.from('service_settings').upsert(row).select().single()); }
+  catch (requestError) { error = requestError; }
+  button.disabled = false; availabilitySwitch.disabled = false;
+  if (error) { $('#settings-save-state').textContent = ''; showToast(`Could not save settings: ${error.message}`); await refreshServiceStatus(); return; }
   service = data; updateServiceUI(); $('#settings-save-state').textContent = 'Saved'; setTimeout(() => $('#settings-save-state').textContent = '', 2400); showToast('Service settings updated for everyone.');
+}
+async function saveServiceAvailability(event) {
+  const input = event.currentTarget; const requested = input.checked; const previous = Boolean(service.is_open);
+  if (!db || !backendReady) { input.checked = previous; showToast('The canteen server is unavailable; order status was not changed.'); return; }
+  const draft = { name: $('#service-name').value, times: ['pickup-start', 'pickup-end', 'order-cutoff'].map(id => [id, $(`#${id}`).value]) };
+  const saveButton = $('#service-form').querySelector('button[type="submit"]');
+  input.disabled = true; saveButton.disabled = true; $('#settings-save-state').textContent = 'Updating order status…';
+  service.is_open = requested; updateServiceUI();
+  draft.times.forEach(([id, value]) => setTimePickerValue(id, value)); $('#service-name').value = draft.name;
+  let data; let error;
+  try { ({ data, error } = await db.from('service_settings').update({ is_open: requested }).eq('id', 1).select().single()); }
+  catch (requestError) { error = requestError; }
+  input.disabled = false; saveButton.disabled = false;
+  if (error) {
+    service.is_open = previous; input.checked = previous; updateServiceUI();
+    draft.times.forEach(([id, value]) => setTimePickerValue(id, value)); $('#service-name').value = draft.name;
+    $('#settings-save-state').textContent = ''; showToast(`Could not update order status: ${error.message}`); await refreshServiceStatus(); return;
+  }
+  service = data; serviceSyncHealthy = true; updateServiceUI();
+  draft.times.forEach(([id, value]) => setTimePickerValue(id, value)); $('#service-name').value = draft.name;
+  $('#settings-save-state').textContent = 'Saved'; setTimeout(() => $('#settings-save-state').textContent = '', 2400);
+  showToast(requested ? 'Online ordering is now on for everyone.' : 'Online ordering is now off for everyone.');
 }
 async function removeMenuItem(id) {
   const entry = MENU.find(itemValue => itemValue.id === id); if (!entry || !confirm(`Remove “${entry.name}” from the menu?`)) return;
@@ -467,12 +584,15 @@ async function createStaffAccount(event) {
 }
 async function uploadAndPlaceOrder(event) {
   event.preventDefault(); const name = $('#student-name').value.trim();
+  if (orderSubmissionInProgress) return;
   if (!name) { $('#student-name').focus(); showToast('Add your name so the canteen knows who to call.'); return; }
   if (!cartCount()) { showToast('Add at least one menu item first.'); return; }
-  if (!serviceIsOpen()) { showToast('Online ordering is currently closed.'); updateServiceUI(); return; }
-  if (backendConfigured && !backendReady) { showToast('The online service is unavailable. Please try again shortly.'); return; }
-  const button = $('#place-order'); button.disabled = true; button.textContent = 'Sending order…';
+  orderSubmissionInProgress = true;
+  const button = $('#place-order'); button.disabled = true; button.textContent = 'Checking service…';
   try {
+    if (backendConfigured && !await refreshServiceStatus()) { showToast('Could not confirm the kitchen status. Please check your connection and try again.'); return; }
+    if (!serviceCanAcceptOrders()) { updateServiceUI(); showToast('Online ordering is closed right now.'); return; }
+    button.textContent = 'Sending order…';
     let order;
     if (db) {
       if (!currentUser?.is_anonymous) await ensureAnonymousSession();
@@ -480,20 +600,28 @@ async function uploadAndPlaceOrder(event) {
       const { data, error } = await db.rpc('place_order', { p_name: name, p_items: payload });
       if (error) throw error; order = Array.isArray(data) ? data[0] : data; await reloadOrders();
     } else {
-      order = { id: crypto.randomUUID(), token: `B${String(orders.length + 1).padStart(3, '0')}`, name, items: Object.entries(cart).map(([id, qty]) => ({ name: item(id)?.name, qty })), total: total(), status: 'Received', created: Date.now() };
+      const created = new Date();
+      order = { id: crypto.randomUUID(), token: localOrderToken(created), name, items: Object.entries(cart).map(([id, qty]) => ({ name: item(id)?.name, qty })), total: total(), status: 'Received', created: created.toISOString() };
       orders.push(order); saveLocalOrders();
     }
     activeOrderId = order.id; localStorage.setItem('breakbite-active', activeOrderId); cart = {};
     $('#student-name').value = ''; $('#modal').classList.add('hidden'); renderMenu(); renderTracking(); openTrack(); showToast(`Order placed! Your token is ${order.token}.`);
-  } catch (error) { showToast(`Order could not be sent: ${error.message}`); }
-  finally { button.disabled = false; button.innerHTML = 'Place order <span>→</span>'; }
+  } catch (error) {
+    if (/ordering is closed|cutoff time has passed/i.test(error.message || '')) await refreshServiceStatus();
+    showToast(`Order could not be sent: ${error.message}`);
+  }
+  finally { orderSubmissionInProgress = false; button.innerHTML = 'Place order <span>→</span>'; syncOrderAvailability(); }
 }
 
 $$('.nav-link').forEach(button => button.addEventListener('click', () => button.dataset.view === 'track' ? openTrack() : openMenu()));
 $('#staff-toggle').addEventListener('click', staff); $('#student-toggle').addEventListener('click', student);
 $('#staff-signout').addEventListener('click', async () => { if (db) await db.auth.signOut(); isStaff = false; staffRole = null; await ensureAnonymousSession(); await refreshIdentity(); await reloadOrders(); student(); });
 $('#browse-menu').addEventListener('click', openMenu);
-$('#checkout').addEventListener('click', () => { if (serviceIsOpen()) { $('#modal').classList.remove('hidden'); $('#student-name').focus(); } });
+$('#checkout').addEventListener('click', async () => {
+  if (backendConfigured && !await refreshServiceStatus()) { showToast('Could not confirm the kitchen status. Please try again.'); return; }
+  if (serviceCanAcceptOrders()) { $('#modal').classList.remove('hidden'); $('#student-name').focus(); }
+  else { updateServiceUI(); showToast('Online ordering is closed right now.'); }
+});
 $('#modal-close').addEventListener('click', () => $('#modal').classList.add('hidden'));
 $('#modal').addEventListener('click', event => { if (event.target === $('#modal')) $('#modal').classList.add('hidden'); });
 $('#place-order').addEventListener('click', uploadAndPlaceOrder);
@@ -510,7 +638,7 @@ $('#staff-login-form').addEventListener('submit', async event => {
   $('#staff-login-error').textContent = ''; $('#staff-password').value = ''; $('#staff-login-modal').classList.add('hidden'); await reloadOrders(); staff();
 });
 $('#service-form').addEventListener('submit', saveServiceSettings);
-$('#service-open').addEventListener('change', () => { service.is_open = $('#service-open').checked; updateServiceUI(); });
+$('#service-open').addEventListener('change', saveServiceAvailability);
 $('#orders-date').addEventListener('change', renderStaff);
 $('#orders-today').addEventListener('click', () => { initializeOrdersDate(); renderStaff(); });
 $('#add-menu-item').addEventListener('click', () => openMenuEditor());
@@ -542,13 +670,31 @@ $('#crop-canvas').addEventListener('pointermove', event => {
 $('#crop-canvas').addEventListener('pointerup', () => { cropDrag = null; });
 $('#crop-canvas').addEventListener('pointercancel', () => { cropDrag = null; });
 $('#staff-account-form').addEventListener('submit', createStaffAccount);
-$('#install-app').addEventListener('click', async () => {
-  if (!installPrompt) { $('#install-help').classList.toggle('hidden'); return; }
-  installPrompt.prompt(); await installPrompt.userChoice; installPrompt = null; $('#install-app').classList.add('hidden');
-});
 let installPrompt = null;
+function appIsInstalled() { return window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true; }
+function showInstallHelp() {
+  const help = $('#install-help');
+  const isAppleMobile = /iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  help.innerHTML = isAppleMobile
+    ? 'On your iPhone or iPad, open BreakBite in <strong>Safari</strong>, tap <strong>Share</strong>, then choose <strong>Add to Home Screen</strong>.'
+    : 'Open this site in your browser menu and choose <strong>Install app</strong> or <strong>Add to Home screen</strong>.';
+  help.classList.toggle('hidden');
+}
+$('#install-app').addEventListener('click', async () => {
+  if (!installPrompt) { showInstallHelp(); return; }
+  installPrompt.prompt();
+  const choice = await installPrompt.userChoice;
+  installPrompt = null;
+  if (choice?.outcome === 'accepted') $('#install-app').classList.add('hidden');
+});
 window.addEventListener('beforeinstallprompt', event => { event.preventDefault(); installPrompt = event; $('#install-app').classList.remove('hidden'); });
 window.addEventListener('appinstalled', () => { $('#install-app').classList.add('hidden'); $('#install-help').classList.add('hidden'); showToast('BreakBite was installed.'); });
 if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) navigator.serviceWorker.register('./sw.js').catch(() => {});
 document.addEventListener('keydown', event => { if (event.key === 'Escape') $$('.modal-backdrop').forEach(modal => modal.classList.add('hidden')); });
-initializeOrdersDate(); updateCategories(); updateServiceUI(); renderMenu(); renderTracking(); renderStaff(); initBackend();
+setInterval(syncOrderAvailability, 1000);
+setInterval(() => { if (document.visibilityState === 'visible' && backendConfigured) refreshServiceStatus(); }, 15000);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && backendConfigured) refreshServiceStatus(); });
+window.addEventListener('focus', () => { if (backendConfigured) refreshServiceStatus(); });
+initializeTimePickers(); initializeOrdersDate(); updateCategories(); updateServiceUI(); renderMenu(); renderTracking(); renderStaff();
+if (appIsInstalled()) $('#install-app').classList.add('hidden');
+initBackend();
