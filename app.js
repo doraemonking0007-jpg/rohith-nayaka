@@ -41,6 +41,26 @@ function formatTime(value) {
   return new Intl.DateTimeFormat('en-IN', { hour: 'numeric', minute: '2-digit', hour12: true }).format(new Date(2000, 0, 1, hour, minute));
 }
 function pickupLabel() { return `${formatTime(service.pickup_start)} – ${formatTime(service.pickup_end)}`; }
+function serviceDateParts(value) {
+  const date = new Date(value);
+  const parts = new Intl.DateTimeFormat('en-CA', { timeZone: service.timezone || 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(date);
+  return { year: parts.find(part => part.type === 'year')?.value, month: parts.find(part => part.type === 'month')?.value, day: parts.find(part => part.type === 'day')?.value };
+}
+function serviceDateKey(value) {
+  const parts = serviceDateParts(value);
+  return `${parts.year}-${parts.month}-${parts.day}`;
+}
+function todayServiceDate() { return serviceDateKey(new Date()); }
+function serviceTimeOfDay(value) {
+  const parts = new Intl.DateTimeFormat('en-GB', { timeZone: service.timezone || 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(new Date(value));
+  const hour = Number(parts.find(part => part.type === 'hour')?.value || 0);
+  return hour < 12 ? 'Morning' : hour < 18 ? 'Lunch' : 'Evening';
+}
+function initializeOrdersDate() {
+  const today = todayServiceDate();
+  $('#orders-date').value = today;
+  $('#orders-date').max = today;
+}
 function serviceIsOpen() {
   if (!service.is_open) return false;
   try {
@@ -137,13 +157,28 @@ function renderTracking() {
   $('#new-order').onclick = () => { activeOrderId = null; localStorage.removeItem('breakbite-active'); openMenu(); };
 }
 function renderStaff() {
-  const sorted = [...orders].sort((a, b) => Date.parse(a.created_at || a.created) - Date.parse(b.created_at || b.created));
-  const pending = sorted.filter(order => order.status === 'Received' || order.status === 'Preparing');
-  const ready = sorted.filter(order => order.status === 'Ready');
-  $('#stat-total').textContent = orders.length; $('#stat-pending').textContent = pending.length; $('#stat-ready').textContent = ready.length;
-  $('#stat-serving').textContent = ready.length ? ready[0].token : (pending[0]?.token || '—');
-  $('#empty-queue').classList.toggle('hidden', sorted.length > 0);
-  $('#orders-body').innerHTML = sorted.map(order => `<tr><td>${escapeHtml(order.token)}</td><td>${escapeHtml(order.name)}</td><td><span class="table-order">${(order.items || []).map(entry => `${Number(entry.qty)} × ${escapeHtml(entry.name)}`).join(', ')}</span><span class="table-sub">₹${Number(order.total)} · ${new Date(order.created_at || order.created).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}</span></td><td>${escapeHtml(pickupLabel())}</td><td><span class="table-status ${escapeHtml(String(order.status).toLowerCase())}">${escapeHtml(order.status)}</span></td><td>${order.status === 'Received' ? `<button class="row-action" data-order="${escapeHtml(order.id)}" data-status="Preparing">Start preparing</button>` : order.status === 'Preparing' ? `<button class="row-action" data-order="${escapeHtml(order.id)}" data-status="Ready">Mark ready</button>` : order.status === 'Ready' ? `<button class="row-action" data-order="${escapeHtml(order.id)}" data-status="Collected">Mark collected</button>` : '✓'}</td></tr>`).join('');
+  const selectedDate = $('#orders-date').value || todayServiceDate();
+  const isToday = selectedDate === todayServiceDate();
+  const datedOrders = orders.filter(order => serviceDateKey(order.created_at || order.created) === selectedDate)
+    .sort((a, b) => Date.parse(a.created_at || a.created) - Date.parse(b.created_at || b.created));
+  const pending = datedOrders.filter(order => order.status === 'Received' || order.status === 'Preparing');
+  const ready = datedOrders.filter(order => order.status === 'Ready');
+  const displayDate = new Date(`${selectedDate}T12:00:00`);
+  const dateLabel = isToday ? 'Today' : new Intl.DateTimeFormat('en-IN', { day: 'numeric', month: 'short', year: 'numeric', timeZone: service.timezone || 'Asia/Kolkata' }).format(displayDate);
+  $('#stat-total').textContent = datedOrders.length; $('#stat-date-label').textContent = dateLabel;
+  $('#stat-pending').textContent = pending.length; $('#stat-ready').textContent = ready.length;
+  $('#stat-serving').textContent = isToday ? (ready.length ? ready[0].token : (pending[0]?.token || '—')) : '—';
+  $('#orders-day-summary').textContent = `${datedOrders.length} ${datedOrders.length === 1 ? 'order' : 'orders'} · grouped by time of day${isToday ? '' : ' · history view is read-only'}`;
+  $('#empty-queue').textContent = isToday ? 'No orders yet today.' : `No orders found for ${dateLabel}.`;
+  $('#empty-queue').classList.toggle('hidden', datedOrders.length > 0);
+  const periods = ['Morning', 'Lunch', 'Evening'];
+  const rows = periods.map(period => {
+    const group = datedOrders.filter(order => serviceTimeOfDay(order.created_at || order.created) === period);
+    if (!group.length) return '';
+    const orderRows = group.map(order => `<tr><td>${escapeHtml(order.token)}</td><td>${escapeHtml(order.name)}</td><td><span class="table-order">${(order.items || []).map(entry => `${Number(entry.qty)} × ${escapeHtml(entry.name)}`).join(', ')}</span><span class="table-sub">₹${Number(order.total)} · ${new Intl.DateTimeFormat('en-IN', { hour: '2-digit', minute: '2-digit', timeZone: service.timezone || 'Asia/Kolkata' }).format(new Date(order.created_at || order.created))}</span></td><td>${escapeHtml(pickupLabel())}</td><td><span class="table-status ${escapeHtml(String(order.status).toLowerCase())}">${escapeHtml(order.status)}</span></td><td>${!isToday ? '<span class="history-readonly">History</span>' : order.status === 'Received' ? `<button class="row-action" data-order="${escapeHtml(order.id)}" data-status="Preparing">Start preparing</button>` : order.status === 'Preparing' ? `<button class="row-action" data-order="${escapeHtml(order.id)}" data-status="Ready">Mark ready</button>` : order.status === 'Ready' ? `<button class="row-action" data-order="${escapeHtml(order.id)}" data-status="Collected">Mark collected</button>` : '✓'}</td></tr>`).join('');
+    return `<tr class="period-row"><td colspan="6"><span>${period}</span><small>${group.length} ${group.length === 1 ? 'order' : 'orders'}</small></td></tr>${orderRows}`;
+  }).join('');
+  $('#orders-body').innerHTML = rows;
   $$('.row-action').forEach(button => button.addEventListener('click', () => setOrderStatus(button.dataset.order, button.dataset.status)));
   renderMenuManager();
 }
@@ -346,6 +381,8 @@ $('#staff-login-form').addEventListener('submit', async event => {
 });
 $('#service-form').addEventListener('submit', saveServiceSettings);
 $('#service-open').addEventListener('change', () => { service.is_open = $('#service-open').checked; updateServiceUI(); });
+$('#orders-date').addEventListener('change', renderStaff);
+$('#orders-today').addEventListener('click', () => { initializeOrdersDate(); renderStaff(); });
 $('#add-menu-item').addEventListener('click', () => openMenuEditor());
 $('#menu-editor-close').addEventListener('click', () => $('#menu-editor-modal').classList.add('hidden'));
 $('#menu-editor-modal').addEventListener('click', event => { if (event.target === $('#menu-editor-modal')) $('#menu-editor-modal').classList.add('hidden'); });
@@ -360,4 +397,4 @@ window.addEventListener('beforeinstallprompt', event => { event.preventDefault()
 window.addEventListener('appinstalled', () => { $('#install-app').classList.add('hidden'); $('#install-help').classList.add('hidden'); showToast('BreakBite was installed.'); });
 if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) navigator.serviceWorker.register('./sw.js').catch(() => {});
 document.addEventListener('keydown', event => { if (event.key === 'Escape') $$('.modal-backdrop').forEach(modal => modal.classList.add('hidden')); });
-updateCategories(); updateServiceUI(); renderMenu(); renderTracking(); renderStaff(); initBackend();
+initializeOrdersDate(); updateCategories(); updateServiceUI(); renderMenu(); renderTracking(); renderStaff(); initBackend();
